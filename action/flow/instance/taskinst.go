@@ -9,7 +9,11 @@ import (
 	"github.com/TIBCOSoftware/flogo-contrib/action/flow/model"
 	"github.com/TIBCOSoftware/flogo-lib/core/activity"
 	"github.com/TIBCOSoftware/flogo-lib/core/data"
+	"github.com/TIBCOSoftware/flogo-lib/core/mapper/exprmapper"
 	"github.com/TIBCOSoftware/flogo-lib/logger"
+	"github.com/TIBCOSoftware/flogo-contrib/action/flow/event"
+	corevent "github.com/TIBCOSoftware/flogo-lib/core/event"
+	"time"
 )
 
 func NewTaskInst(inst *Instance, task *definition.Task) *TaskInst {
@@ -30,6 +34,8 @@ type TaskInst struct {
 
 	inScope  data.Scope
 	outScope data.Scope
+
+	returnError error
 
 	taskID string //needed for serialization
 }
@@ -164,6 +170,12 @@ func (ti *TaskInst) SetOutput(name string, value interface{}) {
 	ti.OutputScope().SetAttrValue(name, value)
 }
 
+func (ti *TaskInst) GetSharedTempData() map[string]interface{} {
+
+	//todo implement
+	return nil
+}
+
 // TaskName implements activity.Context.TaskName method
 // Deprecated
 func (ti *TaskInst) TaskName() string {
@@ -182,6 +194,9 @@ func (ti *TaskInst) Status() model.TaskStatus {
 func (ti *TaskInst) SetStatus(status model.TaskStatus) {
 	ti.status = status
 	ti.flowInst.master.ChangeTracker.trackTaskData(ti.flowInst.subFlowId, &TaskInstChange{ChgType: CtUpd, ID: ti.task.ID(), TaskInst: ti})
+
+	// publish event
+	postTaskEvent(ti)
 }
 
 func (ti *TaskInst) HasWorkingData() bool {
@@ -189,8 +204,8 @@ func (ti *TaskInst) HasWorkingData() bool {
 }
 
 func (ti *TaskInst) Resolve(toResolve string) (value interface{}, err error) {
-
-	return definition.GetDataResolver().Resolve(toResolve, ti.flowInst)
+	//Support expression mapping
+	return exprmapper.GetExpresssionValue(toResolve, ti.flowInst, definition.GetDataResolver())
 }
 
 func (ti *TaskInst) AddWorkingData(attr *data.Attribute) {
@@ -464,7 +479,11 @@ func (taskInst *TaskInst) appendErrorData(err error) {
 	case *definition.LinkExprError:
 		taskInst.flowInst.AddAttr("_E.type", data.TypeString, "link_expr")
 		taskInst.flowInst.AddAttr("_E.message", data.TypeString, err.Error())
+		taskInst.flowInst.AddAttr("_E.data", data.TypeObject, nil)
+		taskInst.flowInst.AddAttr("_E.code", data.TypeString, "")
+		taskInst.flowInst.AddAttr("_E.activity", data.TypeString, taskInst.taskID)
 	case *activity.Error:
+		taskInst.flowInst.AddAttr("_E.type", data.TypeString, "activity")
 		taskInst.flowInst.AddAttr("_E.message", data.TypeString, err.Error())
 		taskInst.flowInst.AddAttr("_E.data", data.TypeObject, e.Data())
 		taskInst.flowInst.AddAttr("_E.code", data.TypeString, e.Code())
@@ -478,13 +497,19 @@ func (taskInst *TaskInst) appendErrorData(err error) {
 		taskInst.flowInst.AddAttr("_E.activity", data.TypeString, e.TaskName())
 		taskInst.flowInst.AddAttr("_E.message", data.TypeString, err.Error())
 		taskInst.flowInst.AddAttr("_E.type", data.TypeString, e.Type())
+		taskInst.flowInst.AddAttr("_E.data", data.TypeObject, nil)
+		taskInst.flowInst.AddAttr("_E.code", data.TypeString, "")
 	default:
 		taskInst.flowInst.AddAttr("_E.activity", data.TypeString, taskInst.taskID)
 		taskInst.flowInst.AddAttr("_E.message", data.TypeString, err.Error())
+		taskInst.flowInst.AddAttr("_E.type", data.TypeString, "unknown")
+		taskInst.flowInst.AddAttr("_E.data", data.TypeObject, nil)
+		taskInst.flowInst.AddAttr("_E.code", data.TypeString, "")
 	}
 
 	//todo add case for *dataMapperError & *activity.Error
 }
+
 //// Failed marks the Activity as failed
 //func (td *TaskInst) Failed(err error) {
 //
@@ -499,3 +524,164 @@ func (taskInst *TaskInst) appendErrorData(err error) {
 //	return ti.flowInst
 //}
 //
+
+type taskEvent struct {
+	time                           time.Time
+	err                            error
+	taskIn, taskOut                map[string]interface{}
+	status                         event.Status
+	name, typeId, flowName, flowId string
+}
+
+// Returns flow name
+func (te *taskEvent) FlowName() string {
+	return te.flowName
+}
+
+// Returns flow ID
+func (te *taskEvent) FlowID() string {
+	return te.flowId
+}
+
+// Returns task name
+func (te *taskEvent) TaskName() string {
+	return te.name
+}
+
+// Returns task type
+func (te *taskEvent) TaskType() string {
+	return te.typeId
+}
+
+// Returns task status
+func (te *taskEvent) TaskStatus() event.Status {
+	return te.status
+}
+
+// Returns event time
+func (te *taskEvent) Time() time.Time {
+	return te.time
+}
+
+// Returns activity input data
+func (te *taskEvent) TaskInput() map[string]interface{} {
+	return te.taskIn
+}
+
+// Returns output data for completed activity
+func (te *taskEvent) TaskOutput() map[string]interface{} {
+	return te.taskOut
+}
+
+// Returns error for failed task
+func (te *taskEvent) TaskError() error {
+	return te.err
+}
+
+func convertTaskStatus(code model.TaskStatus) event.Status {
+	switch code {
+	case model.TaskStatusNotStarted:
+		return event.CREATED
+	case model.TaskStatusEntered:
+		return event.SCHEDULED
+	case model.TaskStatusSkipped:
+		return event.SKIPPED
+	case model.TaskStatusReady:
+		return event.STARTED
+	case model.TaskStatusFailed:
+		return event.FAILED
+	case model.TaskStatusDone:
+		return event.COMPLETED
+	case model.TaskStatusWaiting:
+		return event.WAITING
+	}
+	return event.UNKNOWN
+}
+
+func postTaskEvent(taskInstance *TaskInst) {
+	if corevent.HasListener(event.TASK_EVENT_TYPE) {
+		te := &taskEvent{}
+		te.time = time.Now()
+		te.name = taskInstance.Task().Name()
+		te.status = convertTaskStatus(taskInstance.Status())
+		te.flowName = taskInstance.flowInst.Name()
+		te.flowId = taskInstance.flowInst.ID()
+		te.typeId = taskInstance.Task().TypeID()
+
+		if te.status == event.FAILED {
+			te.err = taskInstance.returnError
+		}
+
+		te.taskIn = make(map[string]interface{})
+		te.taskOut = make(map[string]interface{})
+
+		// Add working data
+		wData := taskInstance.workingData
+		if wData != nil && len(wData) > 0 {
+			for name, attVal := range wData {
+				te.taskIn[name] = attVal.Value()
+			}
+		}
+
+		// Add activity input/output
+		// TODO optimize this computation for given instance
+		if taskInstance.HasActivity() {
+			actConfig := taskInstance.Task().ActivityConfig()
+			if actConfig != nil && actConfig.Activity != nil && actConfig.Activity.Metadata() != nil {
+				metadata := actConfig.Activity.Metadata()
+				if metadata.Input != nil && len(metadata.Input) > 0 && taskInstance.InputScope() != nil {
+					for name, attVal := range actConfig.Activity.Metadata().Input {
+						scopedValue, ok := taskInstance.InputScope().GetAttr(name)
+						if !ok {
+							te.taskIn[name] = attVal.Value()
+						} else {
+							te.taskIn[name] = scopedValue.Value()
+						}
+					}
+				}
+
+				if te.status == event.COMPLETED && metadata.Output != nil && len(metadata.Output) > 0 && taskInstance.OutputScope() != nil {
+					for name, attVal := range actConfig.Activity.Metadata().Output {
+						scopedValue, ok := taskInstance.OutputScope().GetAttr(name)
+						if !ok {
+							te.taskOut[name] = attVal.Value()
+						} else {
+							te.taskOut[name] = scopedValue.Value()
+						}
+					}
+				}
+
+				if metadata.DynamicIO {
+					// Get dynamic input/outputs
+					dynamic, _ := actConfig.Activity.(activity.DynamicIO)
+					dynamicIO, _ := dynamic.IOMetadata(taskInstance)
+					if dynamicIO != nil {
+						if dynamicIO.Input != nil {
+							for name, attVal := range dynamicIO.Input {
+								scopedValue, ok := taskInstance.InputScope().GetAttr(name)
+								if !ok {
+									te.taskIn[name] = attVal.Value()
+								} else {
+									te.taskIn[name] = scopedValue.Value()
+								}
+							}
+						}
+
+						if te.status == event.COMPLETED && dynamicIO.Output != nil {
+							for name, attVal := range dynamicIO.Input {
+								scopedValue, ok := taskInstance.OutputScope().GetAttr(name)
+								if !ok {
+									te.taskOut[name] = attVal.Value()
+								} else {
+									te.taskOut[name] = scopedValue.Value()
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		corevent.PostEvent(event.TASK_EVENT_TYPE, te)
+	}
+
+}

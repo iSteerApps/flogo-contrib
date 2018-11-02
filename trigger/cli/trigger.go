@@ -117,8 +117,15 @@ func (t *CliTrigger) Stop() error {
 
 func Invoke() (string, error) {
 
+	var args []string
 	flag.Parse()
-	args := flag.Args()
+
+	// if we have additional args (after the cmd name and the flow cmd switch)
+	// stuff those into args and pass to Invoke(). The action will only receive the
+	// aditional args that were intending for the action logic.
+	if arg := flag.Args(); len(arg) >= 2 {
+		args = flag.Args()[2:]
+	}
 
 	for _, info := range singleton.handlerInfos {
 

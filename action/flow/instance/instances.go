@@ -206,7 +206,7 @@ func (inst *IndependentInstance) execTask(behavior model.TaskBehavior, taskInst 
 			logger.Error(err)
 
 			// todo: useful for debugging
-			logger.Debugf("StackTrace: %s", debug.Stack())
+			logger.Errorf("StackTrace: %s", debug.Stack())
 
 			if !taskInst.flowInst.isHandlingError {
 
@@ -230,6 +230,7 @@ func (inst *IndependentInstance) execTask(behavior model.TaskBehavior, taskInst 
 	}
 
 	if err != nil {
+		taskInst.returnError = err
 		inst.handleTaskError(behavior, taskInst, err)
 		return
 	}
@@ -246,6 +247,7 @@ func (inst *IndependentInstance) execTask(behavior model.TaskBehavior, taskInst 
 	case model.EVAL_FAIL:
 		taskInst.SetStatus(model.TaskStatusFailed)
 	case model.EVAL_REPEAT:
+		taskInst.SetStatus(model.TaskStatusReady)
 		//task needs to iterate or retry
 		inst.scheduleEval(taskInst)
 	}
@@ -365,6 +367,8 @@ func (inst *IndependentInstance) HandleGlobalError(containerInst *Instance, err 
 		return
 	}
 
+	containerInst.isHandlingError = true
+
 	flowBehavior := inst.flowModel.GetFlowBehavior()
 
 	//not currently handling error, so check if it has an error handler
@@ -398,8 +402,8 @@ func (inst *IndependentInstance) HandleGlobalError(containerInst *Instance, err 
 
 				//inst.scheduleEval(host)
 			}
-		}  else {
-			 inst.returnError = err
+		} else {
+			inst.returnError = err
 		}
 	}
 }
@@ -499,7 +503,7 @@ func (e *ActivityEvalError) Error() string {
 //////////////
 // todo fix the following
 
-func getFlowModel(flow *definition.Definition) *model.FlowModel{
+func getFlowModel(flow *definition.Definition) *model.FlowModel {
 	if flow.ModelID() == "" {
 		return model.Default()
 	} else {
@@ -509,12 +513,12 @@ func getFlowModel(flow *definition.Definition) *model.FlowModel{
 }
 
 //// Restart indicates that this FlowInstance was restarted
-func (inst *IndependentInstance) Restart(id string, manager *support.FlowManager)  error {
+func (inst *IndependentInstance) Restart(id string, manager *support.FlowManager) error {
 	inst.id = id
 	var err error
 	inst.flowDef, err = manager.GetFlow(inst.flowURI)
 
-	if err!= nil {
+	if err != nil {
 		return err
 	}
 	if inst.flowDef == nil {
@@ -535,7 +539,7 @@ func (inst *IndependentInstance) init(flowInst *Instance) {
 		v.task = flowInst.flowDef.GetTask(v.taskID)
 	}
 
-	for _, v := range flowInst.linkInsts  {
+	for _, v := range flowInst.linkInsts {
 		v.flowInst = flowInst
 		v.link = flowInst.flowDef.GetLink(v.linkID)
 	}

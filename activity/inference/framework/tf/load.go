@@ -1,7 +1,6 @@
 package tf
 
 import (
-	"fmt"
 	"io/ioutil"
 	"strings"
 
@@ -12,14 +11,23 @@ import (
 )
 
 // Load implements the backend framework specifics for loading a saved model
-func (a *TensorflowModel) Load(modelPath string, modelFile string, model *models.Model) (err error) {
+func (a *TensorflowModel) Load(model *models.Model, flags models.ModelFlags) (err error) {
 	var meta models.Metadata
 
+	meta.Tag = flags.Tag
+	meta.SigDef = flags.SigDef
+	modelFile := flags.ModelFile
+	modelPath := flags.ModelPath
+
 	// Parse the protobuffer
-	parseProtoBuf(modelFile, &meta)
+	err = parseProtoBuf(modelFile, &meta)
+	if err != nil {
+		return err
+	}
 	model.Metadata = &meta
 
-	bundle, err := tf.LoadSavedModel(modelPath, []string{"serve"}, nil)
+	//Maybe add catch in case tag isn't in model
+	bundle, err := tf.LoadSavedModel(modelPath, []string{model.Metadata.Tag}, nil)
 	if err != nil {
 		return err
 	}
@@ -36,16 +44,17 @@ func parseProtoBuf(file string, model *models.Metadata) error {
 	var savedModel tfpb.SavedModel
 	loadErr := proto.Unmarshal(savedModelPb, &savedModel)
 	if loadErr != nil {
-		fmt.Println(loadErr)
+		return loadErr
 	}
 	metaGraphs := savedModel.GetMetaGraphs()
 
 	// Grab the default graph def
-	sigDef := metaGraphs[0].SignatureDef["serving_default"]
+	sigDef := metaGraphs[0].SignatureDef[model.SigDef]
 
 	// Collect inputs
 	inputs := getValues(sigDef.GetInputs())
 	outputs := getValues(sigDef.GetOutputs())
+	methodName := sigDef.GetMethodName()
 
 	// Determine the feature keys
 	if model.Inputs.Features == nil {
@@ -84,10 +93,36 @@ func parseProtoBuf(file string, model *models.Metadata) error {
 
 			featureIndx++
 		}
+
+		op := node.Op
+		if strings.Contains(op, "Placeholder") {
+			var featureTyp string
+			var featureShape []int64
+			nName := node.GetName()
+
+			for attr, val := range node.GetAttr() {
+				if attr == "dtype" {
+					featureTyp = val.GetType().String()
+				} else if attr == "_output_shapes" {
+					for i := 0; i < len(val.GetList().GetShape()[0].Dim); i++ {
+						featureShape = append(featureShape, val.GetList().GetShape()[0].Dim[i].GetSize())
+					}
+
+				}
+			}
+
+			feat := models.Feature{
+				Shape: featureShape,
+				Type:  featureTyp,
+			}
+
+			model.Inputs.Features[nName] = feat
+		}
 	}
 
 	model.Inputs.Params = inputs
 	model.Outputs = outputs
+	model.Method = methodName
 
 	return nil
 }
